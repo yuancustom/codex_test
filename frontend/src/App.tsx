@@ -1,27 +1,114 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import type { PointerEvent, WheelEvent } from 'react'
 import { Entity, fetchEntities, fetchSheet, fetchSheets, Layer, Sheet } from './api'
 
-function Drawing({ sheet, entities }: { sheet: Sheet; entities: Entity[] }) {
+type ViewBox = { x: number; y: number; w: number; h: number }
+
+function arcPath(e: Entity, flip: (y: number) => number) {
+  const [cx, cy0] = e.center
+  const r = Number(e.radius)
+  const start = Number(e.start_angle) * Math.PI / 180
+  const end = Number(e.end_angle) * Math.PI / 180
+  const sx = cx + r * Math.cos(start)
+  const sy = flip(cy0 + r * Math.sin(start))
+  const ex = cx + r * Math.cos(end)
+  const ey = flip(cy0 + r * Math.sin(end))
+  let delta = Number(e.end_angle) - Number(e.start_angle)
+  if (delta < 0) delta += 360
+  const large = delta > 180 ? 1 : 0
+  return `M ${sx} ${sy} A ${r} ${r} 0 ${large} 0 ${ex} ${ey}`
+}
+
+function EntityShape({ e, flip, onPick, selected }: { e: Entity; flip: (y: number) => number; onPick: (e: Entity) => void; selected: boolean }) {
+  const className = selected ? 'entity selected-entity' : 'entity'
+  const pick = (ev: PointerEvent<SVGElement>) => { ev.stopPropagation(); onPick(e) }
+  if (e.type === 'LINE') return <line className={className} onPointerDown={pick} x1={e.start[0]} y1={flip(e.start[1])} x2={e.end[0]} y2={flip(e.end[1])} />
+  if (e.type === 'LWPOLYLINE' || e.type === 'POLYLINE' || e.type === 'CURVE') {
+    const points = (e.points || []).map((p: number[]) => `${p[0]},${flip(p[1])}`).join(' ')
+    return e.closed ? <polygon className={className} onPointerDown={pick} points={points} /> : <polyline className={className} onPointerDown={pick} points={points} />
+  }
+  if (e.type === 'CIRCLE') return <circle className={className} onPointerDown={pick} cx={e.center[0]} cy={flip(e.center[1])} r={e.radius} />
+  if (e.type === 'ARC') return <path className={className} onPointerDown={pick} d={arcPath(e, flip)} />
+  if (e.type === 'SOLID') {
+    const points = (e.points || []).map((p: number[]) => `${p[0]},${flip(p[1])}`).join(' ')
+    return <polygon className={className} onPointerDown={pick} points={points} />
+  }
+  if (e.type === 'POINT') return <circle className={className} onPointerDown={pick} cx={e.point[0]} cy={flip(e.point[1])} r={18} />
+  if ((e.type === 'TEXT' || e.type === 'MTEXT') && e.text) {
+    const y = flip(e.insert[1])
+    return <text className={className} onPointerDown={pick} x={e.insert[0]} y={y} fontSize={Math.max(e.height || 120, 70)} transform={`rotate(${-Number(e.rotation || 0)} ${e.insert[0]} ${y})`}>{String(e.text).slice(0, 100)}</text>
+  }
+  if (e.type === 'INSERT') return <circle className={className} onPointerDown={pick} cx={e.insert[0]} cy={flip(e.insert[1])} r={24} />
+  return null
+}
+
+function Drawing({ sheet, entities, selectedEntity, onPick }: { sheet: Sheet; entities: Entity[]; selectedEntity: Entity | null; onPick: (e: Entity | null) => void }) {
+  const svgRef = useRef<SVGSVGElement | null>(null)
   const [minX, minY, maxX, maxY] = sheet.bounding_box
-  const width = Math.max(1, maxX - minX)
-  const height = Math.max(1, maxY - minY)
+  const base = useMemo<ViewBox>(() => ({ x: minX, y: minY, w: Math.max(1, maxX - minX), h: Math.max(1, maxY - minY) }), [minX, minY, maxX, maxY])
+  const [view, setView] = useState<ViewBox>(base)
+  const drag = useRef<{ x: number; y: number; view: ViewBox } | null>(null)
   const flip = (y: number) => maxY - (y - minY)
 
+  useEffect(() => setView(base), [base.x, base.y, base.w, base.h])
+
+  const zoom = (factor: number, clientX?: number, clientY?: number) => {
+    const svg = svgRef.current
+    let ax = view.x + view.w / 2
+    let ay = view.y + view.h / 2
+    if (svg && clientX != null && clientY != null) {
+      const rect = svg.getBoundingClientRect()
+      ax = view.x + ((clientX - rect.left) / rect.width) * view.w
+      ay = view.y + ((clientY - rect.top) / rect.height) * view.h
+    }
+    setView({
+      x: ax - (ax - view.x) * factor,
+      y: ay - (ay - view.y) * factor,
+      w: view.w * factor,
+      h: view.h * factor,
+    })
+  }
+
+  const wheel = (ev: WheelEvent<SVGSVGElement>) => {
+    ev.preventDefault()
+    zoom(ev.deltaY > 0 ? 1.14 : 0.88, ev.clientX, ev.clientY)
+  }
+
+  const pointerDown = (ev: PointerEvent<SVGSVGElement>) => {
+    onPick(null)
+    drag.current = { x: ev.clientX, y: ev.clientY, view: { ...view } }
+    ev.currentTarget.setPointerCapture(ev.pointerId)
+  }
+
+  const pointerMove = (ev: PointerEvent<SVGSVGElement>) => {
+    if (!drag.current || !svgRef.current) return
+    const rect = svgRef.current.getBoundingClientRect()
+    const dx = (ev.clientX - drag.current.x) / rect.width * drag.current.view.w
+    const dy = (ev.clientY - drag.current.y) / rect.height * drag.current.view.h
+    setView({ ...drag.current.view, x: drag.current.view.x - dx, y: drag.current.view.y - dy })
+  }
+
+  const pointerUp = (ev: PointerEvent<SVGSVGElement>) => {
+    drag.current = null
+    try { ev.currentTarget.releasePointerCapture(ev.pointerId) } catch { /* noop */ }
+  }
+
+  const zoomPct = Math.round(base.w / view.w * 100)
+
   return (
-    <svg className="drawing" viewBox={`${minX} ${minY} ${width} ${height}`} preserveAspectRatio="xMidYMid meet">
-      <g className="cad-geometry">
-        {entities.map((e, i) => {
-          if (e.type === 'LINE') return <line key={i} x1={e.start[0]} y1={flip(e.start[1])} x2={e.end[0]} y2={flip(e.end[1])} stroke="currentColor" />
-          if (e.type === 'LWPOLYLINE' || e.type === 'POLYLINE') {
-            const points = (e.points || []).map((p: number[]) => `${p[0]},${flip(p[1])}`).join(' ')
-            return e.closed ? <polygon key={i} points={points} fill="none" stroke="currentColor" /> : <polyline key={i} points={points} fill="none" stroke="currentColor" />
-          }
-          if (e.type === 'CIRCLE') return <circle key={i} cx={e.center[0]} cy={flip(e.center[1])} r={e.radius} fill="none" stroke="currentColor" />
-          if ((e.type === 'TEXT' || e.type === 'MTEXT') && e.text) return <text key={i} x={e.insert[0]} y={flip(e.insert[1])} fontSize={Math.max(e.height || 120, 80)} fill="currentColor">{String(e.text).slice(0, 50)}</text>
-          return null
-        })}
-      </g>
-    </svg>
+    <div className="drawing-wrap">
+      <div className="floating-tools">
+        <button onClick={() => zoom(.8)} title="放大">＋</button>
+        <span>{zoomPct}%</span>
+        <button onClick={() => zoom(1.25)} title="缩小">−</button>
+        <button onClick={() => setView(base)} title="适配窗口">FIT</button>
+      </div>
+      <svg ref={svgRef} className="drawing" viewBox={`${view.x} ${view.y} ${view.w} ${view.h}`} preserveAspectRatio="xMidYMid meet" onWheel={wheel} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp}>
+        <g className="cad-geometry">
+          {entities.map((e, i) => <EntityShape key={`${e.handle || 'v'}-${i}`} e={e} flip={flip} onPick={entity => onPick(entity)} selected={selectedEntity === e} />)}
+        </g>
+      </svg>
+    </div>
   )
 }
 
@@ -31,6 +118,7 @@ export default function App() {
   const [detail, setDetail] = useState<(Sheet & { layers: Layer[] }) | null>(null)
   const [enabledLayers, setEnabledLayers] = useState<string[]>([])
   const [entities, setEntities] = useState<Entity[]>([])
+  const [selectedEntity, setSelectedEntity] = useState<Entity | null>(null)
   const [message, setMessage] = useState('正在读取图纸目录…')
 
   useEffect(() => {
@@ -39,22 +127,25 @@ export default function App() {
 
   useEffect(() => {
     setEntities([])
+    setSelectedEntity(null)
     fetchSheet(selected).then(data => {
       setDetail(data)
       setEnabledLayers(data.layers.map(layer => layer.name))
-      if (!data.dxf_available) setMessage(`${selected} 已识别；请运行拆图脚本生成 DXF 后预览`)
+      if (!data.dxf_available) setMessage(`${selected} 已识别；运行拆图脚本后即可在线预览`)
     }).catch(err => setMessage(err.message))
   }, [selected])
 
   useEffect(() => {
     if (!detail?.dxf_available) return
-    fetchEntities(selected, enabledLayers).then(data => {
+    setMessage(`${selected} 正在解析 CAD 实体…`)
+    fetchEntities(selected).then(data => {
       setEntities(data.entities)
-      setMessage(`${selected} · ${data.entities.length.toLocaleString()} 个可视实体`)
+      setMessage(`${selected} · ${data.returned.toLocaleString()} 个可视实体${data.truncated ? '（已截断）' : ''}`)
     }).catch(err => setMessage(err.message))
-  }, [detail?.dxf_available, selected, enabledLayers.join('|')])
+  }, [detail?.dxf_available, selected])
 
   const current = useMemo(() => sheets.find(s => s.sheet_no === selected), [sheets, selected])
+  const visibleEntities = useMemo(() => entities.filter(e => enabledLayers.includes(e.layer)), [entities, enabledLayers])
 
   return (
     <div className="app-shell">
@@ -69,18 +160,19 @@ export default function App() {
       <main className="workspace">
         <header className="topbar">
           <div><span className="eyebrow">CURRENT SHEET</span><h1>{current?.sheet_no} · {current?.sheet_name}</h1></div>
-          <div className="metrics"><span>图号 <b>{current?.drawing_no}</b></span><span>比例 <b>{current?.ratio || '—'}</b></span><span>实体 <b>{current?.source_entity_count ?? 0}</b></span></div>
+          <div className="metrics"><span>图号 <b>{current?.drawing_no}</b></span><span>比例 <b>{current?.ratio || '—'}</b></span><span>实体 <b>{visibleEntities.length.toLocaleString()}</b></span></div>
         </header>
         <section className="canvas-panel">
-          <div className="canvas-toolbar"><span>MODEL SPACE</span><span>CAD 图元预览</span></div>
+          <div className="canvas-toolbar"><span>MODEL SPACE</span><span>滚轮缩放 · 左键拖拽平移 · 点击实体查看属性</span></div>
           <div className="cad-canvas">
-            {current && entities.length > 0 ? <Drawing sheet={current} entities={entities} /> : <div className="empty-state"><div className="frame-icon" /><h2>{current?.sheet_no || 'DXF'}</h2><p>{detail?.dxf_available ? '正在生成预览…' : '图框和图签已识别。将拆分 DXF 放入 data/sheets 后即可在线渲染。'}</p></div>}
+            {current && entities.length > 0 ? <Drawing sheet={current} entities={visibleEntities} selectedEntity={selectedEntity} onPick={setSelectedEntity} /> : <div className="empty-state"><div className="frame-icon" /><h2>{current?.sheet_no || 'DXF'}</h2><p>{detail?.dxf_available ? '正在解析并生成预览…' : '图框和图签已识别。将拆分 DXF 放入 data/sheets 后即可在线渲染。'}</p></div>}
           </div>
         </section>
       </main>
 
       <aside className="inspector">
         <div className="panel-title"><span>LAYERS</span><b>{detail?.layers.length ?? 0}</b></div>
+        <div className="layer-actions"><button onClick={() => setEnabledLayers((detail?.layers || []).map(l => l.name))}>全部</button><button onClick={() => setEnabledLayers([])}>清空</button></div>
         <div className="layer-list">
           {(detail?.layers || []).map(layer => {
             const on = enabledLayers.includes(layer.name)
@@ -88,7 +180,7 @@ export default function App() {
           })}
           {!detail?.layers.length && <div className="layer-placeholder">拆图后自动读取图层</div>}
         </div>
-        <div className="meta-card"><span>BOUNDING BOX</span><code>{current?.bounding_box?.join('\n') || '—'}</code></div>
+        {selectedEntity ? <div className="meta-card entity-card"><span>ENTITY</span><strong>{selectedEntity.type}</strong><code>{JSON.stringify(selectedEntity, null, 2)}</code></div> : <div className="meta-card"><span>BOUNDING BOX</span><code>{current?.bounding_box?.join('\n') || '—'}</code></div>}
       </aside>
     </div>
   )
