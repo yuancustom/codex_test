@@ -42,3 +42,17 @@ def test_j01_entities_if_sample_is_present():
     assert payload['returned'] >= 647
     assert payload['expanded_blocks'] is True
     assert payload['truncated'] is False
+
+
+def test_upload_rejects_non_dxf():
+    response = client.post('/api/source/upload', files={'file': ('not-a-dxf.txt', b'hello', 'text/plain')})
+    assert response.status_code == 415
+
+
+def test_split_status_contract():
+    response = client.get('/api/source/split-status')
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['state'] in {'idle', 'queued', 'running', 'completed', 'failed'}
+    assert isinstance(payload['processed'], int)
+    assert isinstance(payload['total'], int)
