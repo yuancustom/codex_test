@@ -1,0 +1,4 @@
+fastapi>=0.128,<1
+uvicorn[standard]>=0.35,<1
+ezdxf>=1.4,<2
+pydantic>=2.10,<3
