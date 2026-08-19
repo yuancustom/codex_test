@@ -12,12 +12,8 @@ frontend/dist/
 .env
 .DS_Store
 
-# Generated CAD files
-# Keep source/sheets directories in git, but do not accidentally commit large DXF files.
-data/source/*.dxf
-data/sheets/*.dxf
-!data/source/README.md
-!data/sheets/README.md
-
 # TypeScript
 *.tsbuildinfo
+
+# The sample DXF and generated sheet DXFs are intentionally allowed in git.
+# Each sample file is below GitHub's normal single-file size limit.
