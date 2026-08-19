@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent, WheelEvent } from 'react'
-import { Entity, fetchEntities, fetchSheet, fetchSheets, Layer, Sheet } from './api'
+import { Entity, fetchEntities, fetchSheet, fetchSheets, fetchSource, fetchSplitStatus, Layer, Sheet, SourceStatus, SplitStatus, startSplit, uploadSource } from './api'
 
 type ViewBox = { x: number; y: number; w: number; h: number }
 
@@ -20,25 +20,23 @@ function arcPath(e: Entity, flip: (y: number) => number) {
 }
 
 function EntityShape({ e, flip, onPick, selected }: { e: Entity; flip: (y: number) => number; onPick: (e: Entity) => void; selected: boolean }) {
-  const className = selected ? 'entity selected-entity' : 'entity'
-  const pick = (ev: PointerEvent<SVGElement>) => { ev.stopPropagation(); onPick(e) }
-  if (e.type === 'LINE') return <line className={className} onPointerDown={pick} x1={e.start[0]} y1={flip(e.start[1])} x2={e.end[0]} y2={flip(e.end[1])} />
+  const common = { className: selected ? 'entity selected-entity' : 'entity', onPointerDown: (ev: PointerEvent<SVGElement>) => { ev.stopPropagation(); onPick(e) } }
+  if (e.type === 'LINE') return <line {...common} x1={e.start[0]} y1={flip(e.start[1])} x2={e.end[0]} y2={flip(e.end[1])} />
   if (e.type === 'LWPOLYLINE' || e.type === 'POLYLINE' || e.type === 'CURVE') {
     const points = (e.points || []).map((p: number[]) => `${p[0]},${flip(p[1])}`).join(' ')
-    return e.closed ? <polygon className={className} onPointerDown={pick} points={points} /> : <polyline className={className} onPointerDown={pick} points={points} />
+    return e.closed ? <polygon {...common} points={points} /> : <polyline {...common} points={points} />
   }
-  if (e.type === 'CIRCLE') return <circle className={className} onPointerDown={pick} cx={e.center[0]} cy={flip(e.center[1])} r={e.radius} />
-  if (e.type === 'ARC') return <path className={className} onPointerDown={pick} d={arcPath(e, flip)} />
+  if (e.type === 'CIRCLE') return <circle {...common} cx={e.center[0]} cy={flip(e.center[1])} r={e.radius} />
+  if (e.type === 'ARC') return <path {...common} d={arcPath(e, flip)} />
   if (e.type === 'SOLID') {
     const points = (e.points || []).map((p: number[]) => `${p[0]},${flip(p[1])}`).join(' ')
-    return <polygon className={className} onPointerDown={pick} points={points} />
+    return <polygon {...common} points={points} />
   }
-  if (e.type === 'POINT') return <circle className={className} onPointerDown={pick} cx={e.point[0]} cy={flip(e.point[1])} r={18} />
+  if (e.type === 'POINT') return <circle {...common} cx={e.point[0]} cy={flip(e.point[1])} r={18} />
   if ((e.type === 'TEXT' || e.type === 'MTEXT') && e.text) {
-    const y = flip(e.insert[1])
-    return <text className={className} onPointerDown={pick} x={e.insert[0]} y={y} fontSize={Math.max(e.height || 120, 70)} transform={`rotate(${-Number(e.rotation || 0)} ${e.insert[0]} ${y})`}>{String(e.text).slice(0, 100)}</text>
+    return <text {...common} x={e.insert[0]} y={flip(e.insert[1])} fontSize={Math.max(e.height || 120, 70)} transform={`rotate(${-Number(e.rotation || 0)} ${e.insert[0]} ${flip(e.insert[1])})`}>{String(e.text).slice(0, 100)}</text>
   }
-  if (e.type === 'INSERT') return <circle className={className} onPointerDown={pick} cx={e.insert[0]} cy={flip(e.insert[1])} r={24} />
+  if (e.type === 'INSERT') return <circle {...common} cx={e.insert[0]} cy={flip(e.insert[1])} r={24} />
   return null
 }
 
@@ -61,12 +59,9 @@ function Drawing({ sheet, entities, selectedEntity, onPick }: { sheet: Sheet; en
       ax = view.x + ((clientX - rect.left) / rect.width) * view.w
       ay = view.y + ((clientY - rect.top) / rect.height) * view.h
     }
-    setView({
-      x: ax - (ax - view.x) * factor,
-      y: ay - (ay - view.y) * factor,
-      w: view.w * factor,
-      h: view.h * factor,
-    })
+    const nw = view.w * factor
+    const nh = view.h * factor
+    setView({ x: ax - (ax - view.x) * factor, y: ay - (ay - view.y) * factor, w: nw, h: nh })
   }
 
   const wheel = (ev: WheelEvent<SVGSVGElement>) => {
@@ -105,7 +100,7 @@ function Drawing({ sheet, entities, selectedEntity, onPick }: { sheet: Sheet; en
       </div>
       <svg ref={svgRef} className="drawing" viewBox={`${view.x} ${view.y} ${view.w} ${view.h}`} preserveAspectRatio="xMidYMid meet" onWheel={wheel} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp}>
         <g className="cad-geometry">
-          {entities.map((e, i) => <EntityShape key={`${e.handle || 'v'}-${i}`} e={e} flip={flip} onPick={entity => onPick(entity)} selected={selectedEntity === e} />)}
+          {entities.map((e, i) => <EntityShape key={`${e.handle || 'v'}-${i}`} e={e} flip={flip} onPick={onPick} selected={selectedEntity === e} />)}
         </g>
       </svg>
     </div>
@@ -120,10 +115,16 @@ export default function App() {
   const [entities, setEntities] = useState<Entity[]>([])
   const [selectedEntity, setSelectedEntity] = useState<Entity | null>(null)
   const [message, setMessage] = useState('正在读取图纸目录…')
+  const [source, setSource] = useState<SourceStatus>({ available: false, path: 'data/source/original.dxf' })
+  const [split, setSplit] = useState<SplitStatus>({ state: 'idle', processed: 0, total: 26 })
+  const [uploading, setUploading] = useState(false)
+  const [refreshKey, setRefreshKey] = useState(0)
 
   useEffect(() => {
+    fetchSource().then(setSource).catch(() => undefined)
+    fetchSplitStatus().then(setSplit).catch(() => undefined)
     fetchSheets().then(data => { setSheets(data); setMessage(`${data.length} 张图纸已识别`) }).catch(err => setMessage(err.message))
-  }, [])
+  }, [refreshKey])
 
   useEffect(() => {
     setEntities([])
@@ -133,7 +134,7 @@ export default function App() {
       setEnabledLayers(data.layers.map(layer => layer.name))
       if (!data.dxf_available) setMessage(`${selected} 已识别；运行拆图脚本后即可在线预览`)
     }).catch(err => setMessage(err.message))
-  }, [selected])
+  }, [selected, refreshKey])
 
   useEffect(() => {
     if (!detail?.dxf_available) return
@@ -144,6 +145,52 @@ export default function App() {
     }).catch(err => setMessage(err.message))
   }, [detail?.dxf_available, selected])
 
+  const onUpload = async (file?: File) => {
+    if (!file) return
+    setUploading(true)
+    setMessage(`正在上传 ${file.name}…`)
+    try {
+      const status = await uploadSource(file)
+      setSource(status)
+      setMessage(`DXF 已上传 · ${(Number(status.size_bytes || 0) / 1024 / 1024).toFixed(1)} MB`)
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : String(err))
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  const onSplit = async () => {
+    try {
+      const initial = await startSplit()
+      setSplit(initial)
+      setMessage('开始识别图框并拆分图纸…')
+      const timer = window.setInterval(async () => {
+        try {
+          const status = await fetchSplitStatus()
+          setSplit(status)
+          if (status.state === 'running' || status.state === 'queued') {
+            setMessage(`拆图进度 ${status.processed}/${status.total}${status.current_sheet ? ` · ${status.current_sheet}` : ''}`)
+          }
+          if (status.state === 'completed') {
+            window.clearInterval(timer)
+            setMessage(`拆分完成 · ${status.result?.drawing_count || status.processed} 张图纸`)
+            setRefreshKey(v => v + 1)
+          }
+          if (status.state === 'failed') {
+            window.clearInterval(timer)
+            setMessage(`拆图失败：${status.error || 'unknown error'}`)
+          }
+        } catch (err) {
+          window.clearInterval(timer)
+          setMessage(err instanceof Error ? err.message : String(err))
+        }
+      }, 1500)
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : String(err))
+    }
+  }
+
   const current = useMemo(() => sheets.find(s => s.sheet_no === selected), [sheets, selected])
   const visibleEntities = useMemo(() => entities.filter(e => enabledLayers.includes(e.layer)), [entities, enabledLayers])
 
@@ -152,6 +199,17 @@ export default function App() {
       <aside className="sidebar">
         <div className="brand"><span className="brand-mark">DXF</span><div><strong>Sheet Explorer</strong><small>建筑施工图解析台</small></div></div>
         <div className="status"><span className="status-dot" />{message}</div>
+        <section className="source-box">
+          <div className="source-head"><span>SOURCE DXF</span><b className={source.available ? 'ok' : ''}>{source.available ? 'READY' : 'MISSING'}</b></div>
+          <label className="upload-button">
+            <input type="file" accept=".dxf" disabled={uploading || split.state === 'running' || split.state === 'queued'} onChange={e => onUpload(e.target.files?.[0])} />
+            {uploading ? '上传中…' : '选择并上传 DXF'}
+          </label>
+          <button className="split-button" disabled={!source.available || split.state === 'running' || split.state === 'queued'} onClick={onSplit}>
+            {split.state === 'running' || split.state === 'queued' ? `拆分 ${split.processed}/${split.total}` : '识别图框并拆分'}
+          </button>
+          {source.sha256 && <code className="source-hash">SHA {source.sha256.slice(0, 12)}…</code>}
+        </section>
         <nav className="sheet-list">
           {sheets.map(sheet => <button className={sheet.sheet_no === selected ? 'sheet active' : 'sheet'} key={sheet.sheet_no} onClick={() => setSelected(sheet.sheet_no)}><span>{sheet.sheet_no}</span><em>{sheet.sheet_name}</em><i>{sheet.source_entity_count}</i></button>)}
         </nav>
