@@ -13,6 +13,8 @@
 - 施工图目录：`1`
 - 正式施工图：`J01`–`J26`，共 `26` 张
 - 未归入图框的模型空间实体：`2`
+- 26 张拆分 DXF 已全部重新打开校验通过
+- 拆分文件合计约 `45.3 MB`
 - J01 顶层实体：`647`
 - J01 展开块、标注和曲线后的 Web 可视实体：`1,474`
 
@@ -30,7 +32,19 @@ tools/split_dxf.py       图框识别与拆图
 tools/prepare_source.py  从 .gz/.xz 存档恢复原始 DXF
 ```
 
-## 数据准备
+## 最简单的使用方式：网页上传
+
+启动前后端后，左侧 `SOURCE DXF` 面板可以直接：
+
+1. 选择 `.dxf` 文件并上传；
+2. 后端流式保存并用 `ezdxf` 验证文件；
+3. 点击“识别图框并拆分”；
+4. 拆图在后台任务中执行，前端轮询显示 `0/26 ... 26/26`；
+5. 完成后自动刷新 J01-J26 图纸目录。
+
+上传限制为 100 MB。当前 41.4 MB 样例已经通过真实上传接口验证，返回文件大小和 SHA-256 与原文件一致。
+
+## 数据准备（命令行方式）
 
 原始文件路径：
 
@@ -54,15 +68,6 @@ pip install -r backend/requirements.txt
 python tools/split_dxf.py data/source/original.dxf
 ```
 
-生成：
-
-```text
-data/sheets/J01_*.dxf
-...
-data/sheets/J26_*.dxf
-data/manifest.json
-```
-
 ## 后端
 
 ```bash
@@ -73,6 +78,9 @@ API：
 
 - `GET /api/health`
 - `GET /api/source`
+- `POST /api/source/upload`
+- `POST /api/source/split`
+- `GET /api/source/split-status`
 - `GET /api/sheets`
 - `GET /api/sheets/{sheet_no}`
 - `GET /api/sheets/{sheet_no}/entities?expand_blocks=true&limit=50000`
@@ -91,6 +99,8 @@ npm run dev
 
 当前交互：
 
+- 浏览器选择/上传 DXF
+- 后台拆图任务与实时进度
 - J01-J26 图纸切换
 - CAD 图元 SVG 渲染
 - 鼠标滚轮缩放
@@ -101,6 +111,20 @@ npm run dev
 - ARC 与曲线渲染
 - 块、标注展开后渲染
 
-## 状态
+## Docker
 
-数据解析、26 张图纸识别、拆图和后端实体接口已用真实样例验证。前端源码已完成上述交互；当前执行容器无法访问 npm registry，因此依赖安装/build 需要在具备网络的环境运行后再做最终构建验证。
+```bash
+docker compose up --build
+```
+
+前端：`http://localhost:5173`  
+后端：`http://localhost:8000`
+
+## 测试
+
+```bash
+pip install -r backend/requirements-dev.txt
+PYTHONPATH=. pytest -q backend/tests
+```
+
+当前本地回归测试：`6 passed`。真实样例已验证 26/26 拆分成功，26 个输出 DXF 全部可由 `ezdxf.readfile()` 重新打开。
