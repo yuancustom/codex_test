@@ -20,7 +20,16 @@ def detect_frames(doc):
         if entity.dxf.name not in FRAME_NAMES:
             continue
         ext = bbox.extents([entity], cache=cache, fast=True)
-        frames.append({"frame_entity": entity, "frame_handle": entity.dxf.handle, "paper_block": entity.dxf.name, "bbox_obj": ext, "rotation": float(entity.dxf.rotation or 0), "scale": float(entity.dxf.xscale or 1)})
+        frames.append(
+            {
+                "frame_entity": entity,
+                "frame_handle": entity.dxf.handle,
+                "paper_block": entity.dxf.name,
+                "bbox_obj": ext,
+                "rotation": float(entity.dxf.rotation or 0),
+                "scale": float(entity.dxf.xscale or 1),
+            }
+        )
 
     for entity in msp.query("INSERT"):
         name = entity.dxf.name
@@ -75,23 +84,42 @@ def safe_name(text: str) -> str:
     return re.sub(r'[\\/:*?"<>|#、，（）()\s]+', "_", text).strip("_")[:50]
 
 
-def export(source: Path, output_dir: Path, manifest_path: Path):
+def export(
+    source: Path,
+    output_dir: Path,
+    manifest_path: Path,
+    clean_output: bool = False,
+    validate_outputs: bool = True,
+    progress_callback=None,
+):
     doc = ezdxf.readfile(source)
     frames, cache = detect_frames(doc)
     unassigned = assign_entities(doc, frames, cache)
     output_dir.mkdir(parents=True, exist_ok=True)
-    sheets = []
+    if clean_output:
+        for stale in output_dir.glob("*.dxf"):
+            stale.unlink()
 
+    drawing_frames = []
     for frame in frames:
         attrs = frame["attrs"]
-        drawing_no = attrs.get("图号", "")
         title = attrs.get("图纸名称", "")
+        drawing_no = attrs.get("图号", "")
         if title == "施工图目录":
             continue
         match = re.search(r"J(\d{2})$", drawing_no)
         if not match:
             continue
-        sheet_no = f"J{match.group(1)}"
+        drawing_frames.append((int(match.group(1)), frame))
+    drawing_frames.sort(key=lambda item: item[0])
+
+    sheets = []
+    total = len(drawing_frames)
+    for index, (sheet_index, frame) in enumerate(drawing_frames, start=1):
+        attrs = frame["attrs"]
+        drawing_no = attrs.get("图号", "")
+        title = attrs.get("图纸名称", "")
+        sheet_no = f"J{sheet_index:02d}"
         filename = f"{sheet_no}_{safe_name(title)}.dxf"
         target = output_dir / filename
 
@@ -104,16 +132,45 @@ def export(source: Path, output_dir: Path, manifest_path: Path):
         importer.import_entities(frame["entities"], new_doc.modelspace())
         importer.finalize()
         new_doc.saveas(target)
-        check = ezdxf.readfile(target)
+        output_entity_count = len(new_doc.modelspace())
+        reopen_entity_count = None
+        if validate_outputs:
+            reopen_entity_count = len(ezdxf.readfile(target).modelspace())
         ext = frame["bbox_obj"]
-        sheets.append({"sheet_no": sheet_no, "sheet_name": title, "drawing_no": drawing_no, "ratio": attrs.get("比例", ""), "paper_block": frame["paper_block"], "bounding_box": [round(ext.extmin.x, 3), round(ext.extmin.y, 3), round(ext.extmax.x, 3), round(ext.extmax.y, 3)], "source_entity_count": len(frame["entities"]), "output_file": filename, "output_size_bytes": target.stat().st_size, "reopen_entity_count": len(check.modelspace())})
+        record = {
+            "sheet_no": sheet_no,
+            "sheet_name": title,
+            "drawing_no": drawing_no,
+            "ratio": attrs.get("比例", ""),
+            "paper_block": frame["paper_block"],
+            "bounding_box": [round(ext.extmin.x, 3), round(ext.extmin.y, 3), round(ext.extmax.x, 3), round(ext.extmax.y, 3)],
+            "source_entity_count": len(frame["entities"]),
+            "output_file": filename,
+            "output_size_bytes": target.stat().st_size,
+            "output_entity_count": output_entity_count,
+            "reopen_entity_count": reopen_entity_count,
+        }
+        sheets.append(record)
         print(f"{sheet_no}: {title} -> {filename}")
+        if progress_callback:
+            progress_callback(index, total, record)
 
-    sheets.sort(key=lambda s: int(s["sheet_no"][1:]))
-    manifest = {"source_file": str(source), "source_size_bytes": source.stat().st_size, "dxf_version": doc.dxfversion, "standard_frame_count": len(frames), "directory_count": len(frames) - len(sheets), "drawing_count": len(sheets), "unassigned_modelspace_entities": unassigned, "sheets": sheets}
+    manifest = {
+        "source_file": str(source),
+        "source_size_bytes": source.stat().st_size,
+        "dxf_version": doc.dxfversion,
+        "standard_frame_count": len(frames),
+        "directory_count": len(frames) - len(sheets),
+        "drawing_count": len(sheets),
+        "unassigned_modelspace_entities": unassigned,
+        "sheets": sheets,
+    }
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_manifest = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
+    temp_manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_manifest.replace(manifest_path)
     print(f"Done: {len(sheets)} drawings; manifest={manifest_path}")
+    return manifest
 
 
 def main():
